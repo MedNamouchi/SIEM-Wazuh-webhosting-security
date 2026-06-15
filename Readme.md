@@ -75,7 +75,7 @@ Cybersecurity Engineering Student — Polytech Dijon (Network Security & Quality
 Internship: SOC Analyst / Blue Team, 2026
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue)](https://linkedin.com/in/med-namouchi)
-[![Root-Me](https://img.shields.io/badge/Root--Me-Profile-orange)](https://www.root-me.org)
+
 
 ---
 
