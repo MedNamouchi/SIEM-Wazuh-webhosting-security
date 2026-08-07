@@ -1,0 +1,50 @@
+# =============================================================================
+# .gitignore — SIEM Wazuh Web Hosting Security
+# =============================================================================
+
+# Internal / OFIR-only documentation
+*-OFIR-internal.md
+*-internal.md
+*-private.md
+
+# Real configuration files with credentials or IPs
+ossec.conf
+local_decoder.xml
+webhosting-rules.xml
+
+# Scripts with real webhooks or credentials
+*.sh.real
+*.conf.real
+
+# Sensitive data
+*.key
+*.pem
+*.crt
+*.ppk
+id_rsa
+id_ed25519
+*.env
+
+# Logs
+*.log
+*.log.*
+
+# Archives
+*.gz
+*.zip
+*.tar
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+venv/
