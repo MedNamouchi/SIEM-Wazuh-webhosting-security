@@ -248,10 +248,10 @@ SIEM-Wazuh-webhosting-security/
 ├── 05-use-cases/
 │   └── UC-01-mysql-cluster-node-monitoring.md      # MySQL direct access detection
 │
-├── 03-threat-hunting/
+├── 06-threat-hunting/
 │   └── ssh-attack-investigation.md                 # Real SSH brute-force investigation
 │
-└── 04-lessons-learned/
+└── 07-lessons-learned/
     └── key-findings-01.md                          # Key takeaways
 ```
 
