@@ -141,7 +141,7 @@ Find where web traffic actually goes (logs, vhosts), what the SIEM actually moni
 ```bash
 # Apache version and loaded security modules
 apache2 -v
-apache2ctl -M 2>/dev/null | grep -E 'security|ssl|rewrite|headers'
+apache2ctl -M 2>/dev/null | grep -E 'security|ssl|rewrite|headers|remoteip'
 
 # All active virtual hosts
 sudo apachectl -S 2>&1
@@ -164,6 +164,17 @@ sudo cat /var/ossec/etc/ossec.conf | grep -A5 "localfile\|directories\|active-re
 sudo iptables -L INPUT -n --line-numbers
 sudo ufw status verbose 2>/dev/null
 
+# mod_remoteip — is real client IP being logged? (critical on servers behind reverse proxy)
+apache2ctl -M 2>/dev/null | grep remoteip
+sudo cat /etc/apache2/mods-enabled/remoteip.conf 2>/dev/null
+sudo grep "LogFormat.*combined" /etc/apache2/apache2.conf
+# %h = TCP connection IP (proxy IP), %a = post-remoteip IP (real client IP)
+# If LogFormat uses %h and server is behind NPM/Cloudflare, SIEM attribution is useless
+
+# Verify which IP is actually being logged (test from 4G phone)
+sudo tail -5 /var/log/virtualmin/<domain>_access_log
+# If you see the proxy IP instead of your real phone IP -> LogFormat or mod_remoteip misconfigured
+
 # Disk usage overview
 df -h
 sudo du -sh /var/log/virtualmin/ /var/www /home /var/ossec 2>/dev/null
@@ -181,6 +192,17 @@ sudo cat /etc/cron.d/* 2>/dev/null | grep -v "^#\|^$"
 sudo grep -rh 'CustomLog' /etc/apache2/sites-enabled/ | sort -u
 ```
 
+**The reverse proxy IP logging problem:** If the server sits behind a reverse proxy (NPM, Nginx, HAProxy, Cloudflare), Apache will log the proxy's IP instead of the real client IP — unless `mod_remoteip` is correctly configured. This makes all SIEM attribution useless. Check:
+
+1. Is `mod_remoteip` loaded? → `apache2ctl -M | grep remoteip`
+2. What header does the proxy send? → Deploy a PHP headers dump (`<?php print_r(getallheaders()); ?>`) and request it from an external IP to see exactly what headers arrive
+3. Is `RemoteIPInternalProxy` declared? → Without it, Apache ignores the forwarded IP even if the module is loaded
+4. Does `LogFormat` use `%a` or `%h`? → `%h` = TCP connection IP (proxy), `%a` = real IP after remoteip substitution
+
+**NPM sends `X-Forwarded-For`, not `X-Real-IP`:** If the proxy is Nginx Proxy Manager, it forwards the client IP in `X-Forwarded-For`. Configure `RemoteIPHeader X-Forwarded-For` (not `X-Real-IP`) in `remoteip.conf`.
+
+**Cloudflare-proxied sites need additional trusted proxy ranges:** For sites behind Cloudflare, add all Cloudflare IP ranges as `RemoteIPInternalProxy`. Otherwise, Cloudflare's IP is logged, not the real client.
+
 **No firewall:** An empty `iptables -L INPUT` with policy ACCEPT means no host-level filtering. Combined with no UFW output, this is a critical finding. Note separately whether upstream gateway filtering exists (requires an external test).
 
 **Wazuh FIM coverage:** Check which directories are monitored for file integrity. On a web hosting server, `/var/www` and `/home/*/public_html` are the most important — webshell drops happen there. If they are not in the `<directories>` config, flag it.
@@ -188,6 +210,8 @@ sudo grep -rh 'CustomLog' /etc/apache2/sites-enabled/ | sort -u
 ### Lesson learned
 
 > On any shared hosting server using Virtualmin, the first thing to check is where Apache actually writes its logs. The default path in `ossec.conf` (`/var/log/apache2/access.log`) is almost certainly empty. The real logs are in `/var/log/virtualmin/` — one file per domain.
+
+> `%h` vs `%a` in Apache's `LogFormat` is the difference between logging a proxy IP and logging the real attacker IP. On any server behind a reverse proxy, always verify which one is configured — and validate by checking your own IP from a mobile connection.
 
 ---
 
@@ -222,8 +246,11 @@ sudo find /etc/ssl /etc/apache2 /etc/letsencrypt \
 # Webmin version
 sudo cat /etc/webmin/version 2>/dev/null
 
-# FTP configuration - TLS enabled?
+# FTP configuration - TLS enabled? And is it actually reachable / active?
 sudo grep -E "Port|TLSEngine|PassivePorts" /etc/proftpd/proftpd.conf 2>/dev/null
+# Also check if FTP port is filtered at the perimeter — absence of attacks in logs
+# does not mean the service is hardened, it may simply be blocked upstream
+sudo grep -c "" /var/log/proftpd/proftpd.log 2>/dev/null
 
 # Zabbix agent configuration
 sudo grep -E "^Server|^ServerActive|^Hostname" \
@@ -235,6 +262,8 @@ sudo grep -E "^Server|^ServerActive|^Hostname" \
 **Fail2ban total banned vs total failed ratio:** A healthy ratio is many bans relative to fails. If you see 8000+ failed attempts and only 1 total ban ever, the ban threshold or ban duration is misconfigured for the volume of attacks this server receives.
 
 **Fail2ban only active on SSH:** On a web hosting server, you expect to see activity on postfix, proftpd, and webmin-auth jails too. If all of them show zero failed — either those services are not being attacked (good) or the jails are misconfigured and not picking up logs (verify).
+
+**FTP service — presence vs activity:** FTP being installed and configured without TLS is a legitimate finding. However, before escalating severity, verify whether the FTP port is actually reachable from the internet (test from 4G), and whether there is any real attack traffic in `/var/log/proftpd/`. On this engagement, FTP logs showed only startup/shutdown messages — no authentication attempts at all, suggesting the port is filtered at the perimeter gateway. The TLS finding stands, but the practical risk is lower than initially assessed.
 
 **HTTP security headers:** A production server should return at minimum:
 - `X-Frame-Options`
@@ -276,6 +305,8 @@ curl -sk --max-time 5 -o /dev/null -w "%{http_code}" https://<SERVER_DOMAIN>:100
 
 > Always test admin panel exposure from a real external network (4G hotspot). Testing from inside the server or from the same office network does not prove anything about internet exposure.
 
+> FTP "no TLS" is a valid finding, but always check whether the port is actually reachable from the internet before reporting it as a critical risk. A filtered FTP port without TLS is a medium finding, not a critical one.
+
 ---
 
 ## Block 5 — Final Verifications
@@ -309,6 +340,13 @@ mysql -h <DB_HOST> -u <DB_USER> -p<DB_PASS> <DB_NAME> \
 # Check for suspicious files created after a specific date
 sudo find /home/<CLIENT> -newer /var/log/virtualmin/<DOMAIN>_access_log \
   -type f 2>/dev/null | head -20
+
+# Verify which IPs are actually being logged (proxy vs real client)
+# Deploy a temporary PHP headers dump on a test vhost
+echo '<?php foreach(getallheaders() as $k=>$v) echo "$k: $v\n"; ?>' \
+  > /home/<CLIENT>/public_html/headers-test.php
+# Request from mobile 4G and check which IP appears in Apache logs
+# Remove the file after testing
 ```
 
 ### What to look for
@@ -331,9 +369,13 @@ smtpd_recipient_restrictions = permit_mynetworks permit_sasl_authenticated rejec
 ```
 If `reject_unauth_destination` is missing, the server may be an open relay.
 
+**The headers-test.php technique:** The most reliable way to verify exactly what headers the reverse proxy sends to Apache is to deploy a temporary PHP file that dumps all received headers, then request it from an external IP (4G mobile). This reveals whether the proxy sends `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP`, or something else — and confirms what `mod_remoteip` will actually read.
+
 ### Lesson learned
 
 > When you find suspicious log sequences (like a possible WordPress login), always try to verify at the data layer (database query, WordPress user list) rather than leaving it as "inconclusive" in the report. It takes 30 seconds and removes all ambiguity.
+
+> The headers-test.php technique is the fastest way to understand reverse proxy behavior. Deploying it takes 30 seconds and immediately answers questions that could otherwise take hours of config file analysis.
 
 ---
 
@@ -368,6 +410,27 @@ Three patterns in Apache logs indicate a WordPress attack:
 - `POST /wp-login.php` HTTP 200 followed by `GET /wp-admin/index.php` HTTP 302 = successful login (suspicious if from unknown IP)
 - Multiple IPs rotating User-Agent strings on the same endpoint = botnet
 
+### 7. `%h` vs `%a` in Apache LogFormat — the reverse proxy IP trap
+When Apache sits behind a reverse proxy (NPM, Cloudflare, HAProxy), `%h` in `LogFormat` logs the proxy's TCP connection IP, not the real client. This makes **all SIEM attribution useless** — every "attacker IP" in the dashboard is the proxy's IP.
+
+The correct configuration requires three things working together:
+1. `mod_remoteip` loaded (`apache2ctl -M | grep remoteip`)
+2. `RemoteIPHeader <correct-header>` — must match what the proxy actually sends (verify with `headers-test.php`)
+3. `RemoteIPInternalProxy <proxy-ip>` — declares the proxy as trusted; without this, Apache ignores the header
+4. `LogFormat` using `%a` instead of `%h`
+
+For Cloudflare-proxied sites, additionally add all Cloudflare IP ranges as `RemoteIPInternalProxy`. Cloudflare sends the real client IP in `CF-Connecting-IP` — NPM must be configured to forward it in `X-Forwarded-For` before Apache can read it.
+
+**How to verify:** From a 4G mobile (different IP), request any page on the server, then check the Apache log. If you see your real mobile IP → working. If you see the proxy IP → misconfigured.
+
+### 8. FTP "no TLS" severity depends on reachability
+FTP without TLS is a valid security finding. But before reporting it as critical, always check whether the port is actually exposed to the internet. On perimeter-filtered servers, the practical risk is medium, not critical. Check `/var/log/proftpd/` — if there are zero authentication attempts, the port is likely filtered upstream.
+
+### 9. iptables LOG events bypass the Wazuh alert pipeline
+When using `iptables -A OUTPUT -j LOG` to capture network events (e.g. MySQL cluster direct access monitoring), the generated syslog messages are classified as `type: firewall` by the native Wazuh `iptables-1` decoder. This routes them to a separate firewall queue that **bypasses the standard alert pipeline entirely** — custom rules with `if_sid` never fire on these events.
+
+Fix: use rsyslog to intercept the specific log prefix, reformat the line with a different `program_name`, and write it to a dedicated file before Wazuh collection. This bypasses the firewall decoder classification.
+
 ---
 
 ## Reusable Discovery Checklist
@@ -395,18 +458,24 @@ Use this checklist for any similar mission (shared web hosting server, Apache + 
 - [ ] Log sizes checked (spot the active ones)
 - [ ] HTTP security headers checked (`curl -sI`)
 - [ ] SSL certificate locations found
+- [ ] **mod_remoteip loaded and correctly configured** (`apache2ctl -M | grep remoteip`)
+- [ ] **LogFormat uses `%a` not `%h`** (verify with `grep LogFormat.*combined /etc/apache2/apache2.conf`)
+- [ ] **Real client IP verified from external connection** (deploy headers-test.php, test from 4G)
+- [ ] **Proxy headers identified** (what does NPM/Cloudflare actually send?)
 
 ### SIEM
 - [ ] Wazuh `ossec.conf` reviewed — which logs are actually monitored?
 - [ ] Confirmed the declared log paths exist and are non-empty
 - [ ] FIM directories reviewed — does it cover `/var/www` and `/home`?
 - [ ] Active response configuration noted
+- [ ] **inotify watch limit checked before deploying recursive FIM** (`cat /proc/sys/fs/inotify/max_user_watches`)
 
 ### Security Posture
 - [ ] Firewall checked (`iptables -L INPUT`, `ufw status`)
 - [ ] Fail2ban status checked per jail (ratio of fails to bans)
 - [ ] Admin panel reachability tested from external network
 - [ ] FTP TLS configuration checked
+- [ ] **FTP port reachability from internet verified** (test from 4G, not just internal)
 - [ ] Redis authentication checked
 - [ ] Postfix open relay check
 - [ ] Mail queue checked
