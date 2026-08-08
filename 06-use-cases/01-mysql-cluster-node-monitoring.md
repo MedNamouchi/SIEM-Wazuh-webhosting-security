@@ -1,10 +1,10 @@
 # UC-01 — MySQL Cluster Node Direct Access Monitoring
 
-**Category:** Network Security / Policy Enforcement  
-**Priority:** High  
-**Status:** ✅ Deployed & Validated  
-**MITRE ATT&CK:** T1190 — Exploit Public-Facing Application  
-**Compliance:** GDPR IV.35.7.d · NIST 800-53 AC.4 · PCI-DSS 1.3  
+**Category:** Network Security / Policy Enforcement
+**Priority:** High
+**Status:** ✅ Deployed & Validated
+**MITRE ATT&CK:** T1190 — Exploit Public-Facing Application
+**Compliance:** GDPR IV.35.7.d · NIST 800-53 AC.4 · PCI-DSS 1.3
 
 ---
 
@@ -15,24 +15,28 @@ composed of three dedicated nodes and one load balancer. The expected and
 authorized architecture is:
 
 ```
-Web Server (punica) → Load Balancer (.28) → MySQL Nodes (.14 / .15 / .16)
+Web Server (<web-server-ip>) → Load Balancer (<lb-ip>) → MySQL Nodes (<node1-ip> / <node2-ip> / <node3-ip>)
 ```
 
-Any direct communication between the web server and the MySQL nodes — bypassing
-the load balancer — is abnormal and may indicate a misconfiguration, a
-compromised application, or an unauthorized lateral movement attempt. The
-hosting team requested real-time alerting on any such direct communication,
-regardless of protocol or port.
+Any direct communication between the web server and the MySQL nodes —
+bypassing the load balancer — is abnormal and may indicate:
+- A misconfigured application connecting directly to a node
+- A compromised process attempting lateral movement
+- An attacker with local access attempting to reach the database tier directly
+
+The infrastructure team requested real-time alerting on **any communication**
+between the web server and the three MySQL nodes, regardless of protocol,
+port, or direction.
 
 ---
 
 ## Objective
 
-Detect and alert on **any network communication** (inbound or outbound, any
-protocol, any port) between the web hosting server and the three MySQL cluster
-nodes, and notify the infrastructure team immediately.
+Detect and alert on any network communication (inbound or outbound, any
+protocol, any port) between the web hosting server and the three MySQL
+cluster nodes, and notify the infrastructure team immediately via email.
 
-| Component | Role | IP |
+| Component | Role | Identifier |
 |---|---|---|
 | Web hosting server | Source / Destination to monitor | `<web-server-ip>` |
 | Load balancer | Authorized intermediary — not monitored | `<lb-ip>` |
@@ -44,49 +48,62 @@ nodes, and notify the infrastructure team immediately.
 
 ## Solution Architecture
 
-The detection pipeline is built in four layers:
-
 ```
-iptables LOG rules
+iptables LOG rules (on web server)
       ↓
-rsyslog (intercept + reformat)
+rsyslog intercept + reformat
+      ↓
+/var/log/mysql-nodes-direct.log
       ↓
 Wazuh agent (logcollector)
       ↓
-Wazuh manager (rule 200600 → alert level 12 + email)
+Wazuh manager → rule 200600 → alert level 12 + email
 ```
 
-### Layer 1 — iptables LOG rules
+---
 
-Six iptables rules were added on the web hosting server to log all traffic
-in both directions between the server and the three MySQL nodes:
+## Layer 1 — iptables LOG Rules
+
+Six iptables rules capture all traffic in both directions between the web
+server and the three MySQL nodes:
 
 ```bash
-# Outbound traffic (server → nodes)
+# Outbound (web server → nodes)
 iptables -A OUTPUT -d <node1-ip> -j LOG --log-prefix "MYSQL_NODE_DIRECT: " --log-level 4
 iptables -A OUTPUT -d <node2-ip> -j LOG --log-prefix "MYSQL_NODE_DIRECT: " --log-level 4
 iptables -A OUTPUT -d <node3-ip> -j LOG --log-prefix "MYSQL_NODE_DIRECT: " --log-level 4
 
-# Inbound traffic (nodes → server)
+# Inbound (nodes → web server)
 iptables -A INPUT -s <node1-ip> -j LOG --log-prefix "MYSQL_NODE_DIRECT: " --log-level 4
 iptables -A INPUT -s <node2-ip> -j LOG --log-prefix "MYSQL_NODE_DIRECT: " --log-level 4
 iptables -A INPUT -s <node3-ip> -j LOG --log-prefix "MYSQL_NODE_DIRECT: " --log-level 4
 ```
 
-Rules are **LOG only** (no DROP) — traffic is not blocked, only recorded.
+Rules are **LOG only** (no DROP) — traffic passes normally, only recorded.
 Rules are persisted across reboots via `iptables-persistent`.
 
 **Coverage:** TCP, UDP, ICMP — any port — both directions.
 
-### Layer 2 — rsyslog interception
+**Load balancer excluded intentionally:** `<lb-ip>` is not in the monitored
+addresses. Communication between the web server and the load balancer is
+expected and authorized.
 
-iptables writes to `/var/log/kern.log` by default. The native Wazuh kernel
-decoder (`iptables-1`) classifies these events as `type: firewall` and routes
-them to a separate firewall queue, bypassing the standard alert pipeline.
+---
 
-To work around this, rsyslog is configured to intercept messages containing
-`MYSQL_NODE_DIRECT`, reformat them with a custom template, and write them to
-a dedicated file owned by the Wazuh user:
+## Layer 2 — rsyslog Interception
+
+### Why rsyslog is required
+
+iptables LOG messages go to `/var/log/kern.log` by default. The native
+Wazuh `iptables-1` decoder classifies all iptables events as `type: firewall`,
+routing them to a separate firewall queue that **bypasses the standard rule
+engine entirely**. Custom rules using `if_sid` never fire on these events.
+
+### Solution
+
+rsyslog intercepts messages containing `MYSQL_NODE_DIRECT`, reformats them
+with a custom template that changes the `program_name`, and writes to a
+dedicated file owned by the Wazuh user:
 
 ```
 # /etc/rsyslog.d/mysql-nodes.conf
@@ -98,8 +115,7 @@ template(name="mysql_node_tpl" type="string"
 & stop
 ```
 
-The `& stop` directive prevents the message from also being written to
-`kern.log`, avoiding duplicate processing.
+The `& stop` directive prevents double-processing in `kern.log`.
 
 File permissions:
 ```bash
@@ -107,23 +123,39 @@ chown syslog:wazuh /var/log/mysql-nodes-direct.log
 chmod 640 /var/log/mysql-nodes-direct.log
 ```
 
-Log rotation is handled by a dedicated logrotate config
-(`/etc/logrotate.d/kern-wazuh`) with `create 0640 syslog wazuh` to preserve
-permissions after rotation.
+Log rotation (`/etc/logrotate.d/mysql-nodes-direct`):
+```
+/var/log/mysql-nodes-direct.log {
+    su root adm
+    rotate 4
+    weekly
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 syslog wazuh
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}
+```
 
-### Layer 3 — Wazuh agent collection
+---
 
-The dedicated log file is added to the Wazuh agent configuration:
+## Layer 3 — Wazuh Agent Collection
 
 ```xml
-<!-- /var/ossec/etc/ossec.conf on the web hosting server -->
+<!-- /var/ossec/etc/ossec.conf on web hosting server -->
 <localfile>
   <log_format>syslog</log_format>
   <location>/var/log/mysql-nodes-direct.log</location>
 </localfile>
 ```
 
-### Layer 4 — Wazuh detection rule
+---
+
+## Layer 4 — Detection Rule
 
 ```xml
 <group name="webhosting,network,mysql,">
@@ -131,8 +163,8 @@ The dedicated log file is added to the Wazuh agent configuration:
   <rule id="200600" level="12">
     <if_sid>88100</if_sid>
     <match>MYSQL_NODE_DIRECT</match>
-    <description>ALERT: Direct communication detected between the web server
-    and a MySQL cluster node — should go through load balancer only</description>
+    <description>ALERT: Direct communication detected between web server
+    and MySQL cluster node — should go through load balancer only</description>
     <group>policy_violation,gdpr_IV_35.7.d,nist_800_53_AC.4,pci_dss_1.3,</group>
     <options>alert_by_email</options>
     <mitre>
@@ -143,51 +175,56 @@ The dedicated log file is added to the Wazuh agent configuration:
 </group>
 ```
 
-**Rule ID:** 200600  
-**Level:** 12 (Critical)  
-**Email notification:** Yes (`mail: True`) — infrastructure team notified immediately  
+**Rule ID:** 200600
+**Level:** 12 (Critical)
+**Email:** Yes — infrastructure team notified immediately
+**Parent:** `if_sid: 88100` (MariaDB group messages decoder — used because
+the rsyslog template sets `program_name` to `MYSQL_ALERT` which is parsed
+by the `mariadb-syslog` decoder)
 
 ---
 
 ## Key Engineering Notes
 
-**Why rsyslog reformatting was necessary:**
-The native Wazuh kernel decoder (`iptables-1` in `0140-kernel_decoders.xml`)
-uses `<type>firewall</type>`, which routes matched events to a separate firewall
-queue (`firewall_written`) that bypasses the standard alert pipeline and archive
-log. Events classified as `type: firewall` never reach the rule engine and
-therefore never trigger alerts — even with `logall` enabled. The rsyslog
-template reformats the line so that it is parsed by the `mariadb-syslog`
-decoder instead (`program_name: MYSQL_ALERT`), which feeds the standard
-pipeline correctly.
+### Why `if_sid: 88100` instead of `if_sid: 554` or a custom decoder
 
-**Why `if_sid: 88100` instead of a direct decoder match:**
-Rule 200600 uses `if_sid: 88100` (MariaDB group messages) as its parent,
-combined with `<match>MYSQL_NODE_DIRECT</match>` to ensure it only fires on
-our specific iptables events — not on actual MariaDB log entries.
+The rsyslog template sets the log line's `program_name` to `MYSQL_ALERT`.
+Wazuh's `mariadb-syslog` decoder matches on this program name, classifying
+the event under rule 88100 (MariaDB group messages, level 0). Rule 200600
+uses `if_sid: 88100` as parent and `<match>MYSQL_NODE_DIRECT</match>` to
+ensure it only fires on our specific iptables events — not on actual
+MariaDB log entries.
 
-**Load balancer exclusion:**
-The load balancer IP is intentionally excluded from the monitored addresses.
-Communication between the web server and the load balancer is authorized
-and expected; only direct node communication is suspicious.
+### Why the iptables firewall queue bypass was not obvious
+
+The `iptables-1` decoder's `type: firewall` classification is not documented
+prominently. The symptom — events visible in `archives.json` but custom
+rules never firing — appears identical to a rule syntax error. The root cause
+was identified only by examining the `firewall_written` counter in
+`wazuh-analysisd.state` (value remained 0 despite events) and reading the
+Wazuh decoder source files directly.
 
 ---
 
 ## Validation
 
-Tested by generating ICMP traffic from the web hosting server to each of the
-three MySQL nodes. Alerts fired within 2 seconds of the first packet in both
-directions:
+Tested by generating ICMP traffic from the web server to each MySQL node:
+
+```bash
+ping -c 1 <node1-ip>
+```
+
+Alerts fired within 2 seconds in both directions:
 
 ```
 Rule: 200600 (level 12) → 'ALERT: Direct communication detected between
-the web server and a MySQL cluster node — should go through load balancer only'
+web server and MySQL cluster node — should go through load balancer only'
 
 Outbound: SRC=<web-server-ip> DST=<node1-ip> PROTO=ICMP
 Inbound:  SRC=<node1-ip>      DST=<web-server-ip> PROTO=ICMP
 ```
 
-Both directions confirmed. Email notification confirmed (`mail: True`).
+Email notification confirmed (`mail: True`). Both directions captured. ✅
 
 ---
 
@@ -195,13 +232,14 @@ Both directions confirmed. Email notification confirmed (`mail: True`).
 
 | File | Location | Change |
 |---|---|---|
-| iptables rules | Web hosting server | 6 LOG rules added (INPUT + OUTPUT × 3 nodes) |
-| `/etc/rsyslog.d/mysql-nodes.conf` | Web hosting server | New — intercept + reformat iptables events |
-| `/var/log/mysql-nodes-direct.log` | Web hosting server | New — dedicated log file owned by wazuh |
-| `/etc/logrotate.d/kern-wazuh` | Web hosting server | New — log rotation with wazuh permissions |
-| `/var/ossec/etc/ossec.conf` | Web hosting server (agent) | Added localfile for mysql-nodes-direct.log |
+| iptables rules | Web server | 6 LOG rules added (INPUT + OUTPUT × 3 nodes) |
+| `/etc/rsyslog.d/mysql-nodes.conf` | Web server | New — intercept + reformat |
+| `/var/log/mysql-nodes-direct.log` | Web server | New — dedicated log file |
+| `/etc/logrotate.d/mysql-nodes-direct` | Web server | New — log rotation |
+| `/var/ossec/etc/ossec.conf` | Web server (agent) | Added localfile entry |
 | `webhosting-rules.xml` | Wazuh manager | Rule 200600 added |
 
 ---
-*Part of the SIEM Web Hosting Security project — Detection Engineering*  
-*Last updated: June 2026*
+
+*Part of the SIEM Web Hosting Security project — Detection Engineering*
+*Last updated: August 2026*
