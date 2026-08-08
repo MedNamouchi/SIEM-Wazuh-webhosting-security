@@ -245,13 +245,13 @@ SIEM-Wazuh-webhosting-security/
 ├── 05-dashboard/
 │   └── 01-soc-dashboard.md                         # OpenSearch dashboard documentation
 │
-├── 05-use-cases/
+├── 06-use-cases/
 │   └── UC-01-mysql-cluster-node-monitoring.md      # MySQL direct access detection
 │
-├── 06-threat-hunting/
+├── 07-threat-hunting/
 │   └── ssh-attack-investigation.md                 # Real SSH brute-force investigation
 │
-└── 07-lessons-learned/
+└── 08-lessons-learned/
     └── key-findings-01.md                          # Key takeaways
 ```
 
