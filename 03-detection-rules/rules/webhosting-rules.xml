@@ -1,0 +1,304 @@
+<!--
+  ================================================================
+  Wazuh Custom Rules — Web Hosting Security (punica.ofir.hr)
+  ================================================================
+  Detection rules for Apache/Virtualmin shared hosting server.
+  Requires Phase 2 custom decoders (apache-vhost-full family).
+
+  Rule ID ranges:
+    200100–200107 : WordPress attacks
+    200200–200203 : Scanners & bots
+    200300–200306 : Web application attacks
+    200400–200402 : FIM (webshell drops, config changes)
+    200500–200502 : Auth brute force (FTP + Webmin)
+
+  File location (Wazuh Manager):
+  /var/ossec/etc/rules/webhosting-rules.xml
+  ================================================================
+-->
+
+<!-- ============================================================
+     SCANNERS & BOTS
+     ============================================================ -->
+<group name="webhosting,recon,scanners,">
+<!-- Parent: any 404 response — used by 200202 -->
+ <rule id="200210" level="1">
+    <decoded_as>apache-vhost-full</decoded_as>
+    <field name="http_status">404</field>
+    <options>no_log</options>
+    <description>Web Hosting: 404 Not Found response</description>
+ </rule>
+
+  <!-- Parent: any Apache request — used by 200203 -->
+ <rule id="200211" level="1">
+    <decoded_as>apache-vhost-full</decoded_as>
+    <options>no_log</options>
+    <description>Web Hosting: Apache request received</description>
+  </rule>
+
+  <!-- 3.8 — Scanner User-Agent -->
+  <rule id="200200" level="8">
+    <decoded_as>apache-vhost-full</decoded_as>
+    <field name="user_agent" type="pcre2">(?i)nikto|sqlmap|nuclei|gobuster|dirbuster|wfuzz|masscan|zgrab</field>
+    <description>Web Hosting: Scanner detected — UA: $(user_agent) from $(srcip) on $(vhost)</description>
+    <group>recon,scanner,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_11.4,</group>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+  </rule>
+
+  <!-- 3.9 — Indexer/crawler detection (Censys, Shodan) -->
+  <rule id="200201" level="3">
+    <decoded_as>apache-vhost-full</decoded_as>
+    <field name="user_agent" type="pcre2">(?i)censysinspect|shodan|binaryedge|shadowserver|internet-measurement</field>
+    <description>Web Hosting: Internet indexer detected — UA: $(user_agent) from $(srcip) on $(vhost)</description>
+    <group>recon,indexer,nist_800_53_SI.4,</group>
+    <mitre>
+      <id>T1595</id>
+    </mitre>
+  </rule>
+
+<!-- 3.10 — 404 flood: 30+ in 60s from same IP -->
+  <rule id="200202" level="10" frequency="30" timeframe="60">
+    <if_matched_sid>200210</if_matched_sid>
+    <same_source_ip/>
+    <description>Web Hosting: 404 flood — 30+ not found responses from $(srcip) on $(vhost)</description>
+    <group>recon,scanner,dos,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_11.4,</group>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+  </rule>
+
+  <!-- 3.11 — High request rate: 100+ in 60s from same IP -->
+  <rule id="200203" level="8" frequency="100" timeframe="60">
+    <if_matched_sid>200211</if_matched_sid>
+    <same_source_ip/>
+    <description>Web Hosting: High request rate — 100+ requests from $(srcip) on $(vhost)</description>
+    <group>recon,dos,nist_800_53_SI.4,pci_dss_11.4,</group>
+    <mitre>
+      <id>T1595</id>
+    </mitre>
+  </rule>
+
+</group>
+<!-- ============================================================
+     MYSQL CLUSTER DIRECT ACCESS DETECTION
+     ============================================================ -->
+<group name="webhosting,network,mysql,">
+
+  <!-- Direct communication between punica and MySQL cluster nodes -->
+  <rule id="200600" level="12">
+    <if_sid>88100</if_sid>
+    <match>MYSQL_NODE_DIRECT</match>
+    <description>ALERT: Direct communication detected between punica and MySQL cluster node $(dstip) — should go through load balancer only</description>
+    <group>policy_violation,gdpr_IV_35.7.d,nist_800_53_AC.4,pci_dss_1.3,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+</group>
+<group name="webhosting,wordpress,">
+
+  <!-- 3.1 — WP login attempt (POST to wp-login.php) -->
+  <rule id="200100" level="4">
+    <decoded_as>apache-vhost-full</decoded_as>
+    <field name="wp_pattern">wp-login.php</field>
+    <match>POST</match>
+    <description>Web Hosting: WordPress login attempt from $(srcip) on $(vhost)</description>
+    <group>authentication_attempt,gdpr_IV_35.7.d,nist_800_53_AC.7,pci_dss_10.2.4,</group>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+  </rule>
+
+<!-- 3.2 — WP brute force: 10+ login attempts in 60s from same IP -->
+<rule id="200101" level="10" frequency="10" timeframe="60">
+  <if_matched_sid>200100</if_matched_sid>
+  <same_source_ip/>
+  <description>Web Hosting: WordPress brute force — 10+ login attempts from $(srcip) on $(vhost)</description>
+  <group>bruteforce,authentication_failures,gdpr_IV_35.7.d,gdpr_IV_32.2,nist_800_53_AC.7,pci_dss_10.2.4,pci_dss_11.4,</group>
+  <mitre>
+    <id>T1110.001</id>
+  </mitre>
+</rule>
+<!-- 3.3 — Username enumeration (?author=) -->
+<rule id="200102" level="6">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <field name="wp_pattern" type= "pcre2">\?author=</field>
+  <description>Web Hosting: WordPress username enumeration attempt from $(srcip) on $(vhost)</description>
+  <group>recon,gdpr_IV_35.7.d,nist_800_53_SI.4,</group>
+  <mitre>
+    <id>T1589.003</id>
+  </mitre>
+</rule>
+<!-- 3.4 — Rapid username enumeration: 5+ in 30s from same IP -->
+<rule id="200103" level="10" frequency="5" timeframe="30">
+  <if_matched_sid>200102</if_matched_sid>
+  <same_source_ip/>
+  <description>Web Hosting: Rapid username enumeration — 5+ ?author= requests from $(srcip) on $(vhost)</description>
+  <group>recon,bruteforce,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_11.4,</group>
+  <mitre>
+    <id>T1589.003</id>
+  </mitre>
+</rule>
+<!-- 3.6 — xmlrpc.php abuse -->
+<rule id="200105" level="8">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <field name="wp_pattern">xmlrpc.php</field>
+  <match>POST</match>
+  <description>Web Hosting: XML-RPC abuse attempt from $(srcip) on $(vhost)</description>
+  <group>recon,exploit_attempt,gdpr_IV_35.7.d,nist_800_53_SI.4,</group>
+  <mitre>
+    <id>T1190</id>
+  </mitre>
+</rule>
+<!-- 3.7 — File upload to wp-content/plugins -->
+<rule id="200106" level="10">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <match type="pcre2">POST .*wp-content/plugins/.*\.(php|php5|phtml)</match>
+  <description>Web Hosting: Possible plugin upload/webshell drop attempt from $(srcip) on $(vhost)</description>
+  <group>webshell,exploit_attempt,gdpr_IV_35.7.d,nist_800_53_SI.4,</group>
+  <mitre>
+    <id>T1505.003</id>
+  </mitre>
+</rule>
+</group>
+
+<group name="webhosting,webapp,">
+
+  <!-- 3.12 — SQL injection attempt -->
+  <rule id="200300" level="10">
+    <decoded_as>apache-vhost-full</decoded_as>
+    <match type="pcre2">(?i)(union(\s|%20)+select|1=1|%27|\bor\b.{1,10}=|sleep\(|benchmark\()</match>
+    <description>Web Hosting: SQL injection attempt from $(srcip) on $(vhost)</description>
+    <group>web_attack,sql_injection,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_6.5.1,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+<!-- 3.13 — XSS attempt -->
+<rule id="200301" level="8">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <match type="pcre2">(?i)(%3Cscript|&lt;script|onerror(\s|%20)*=|javascript:|%3Conerror)</match>
+  <description>Web Hosting: XSS attempt from $(srcip) on $(vhost)</description>
+  <group>web_attack,xss,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_6.5.1,</group>
+  <mitre>
+    <id>T1190</id>
+  </mitre>
+</rule>
+<!-- 3.14 — Path traversal attempt -->
+<rule id="200302" level="10">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <match type="pcre2">(\.\./|%2e%2e|\.\.%2f|%2e%2e%2f)</match>
+  <description>Web Hosting: Path traversal attempt from $(srcip) on $(vhost)</description>
+  <group>web_attack,path_traversal,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_6.5.1,</group>
+  <mitre>
+    <id>T1190</id>
+  </mitre>
+</rule>
+<!-- 3.15 — Sensitive file access attempt -->
+<rule id="200303" level="10">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <match type="pcre2">(?i)(\.env|wp-config\.php|\.git/|/etc/passwd|\.htpasswd|id_rsa)</match>
+  <description>Web Hosting: Sensitive file access attempt from $(srcip) on $(vhost)</description>
+  <group>web_attack,sensitive_file,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_6.5.1,</group>
+  <mitre>
+    <id>T1083</id>
+  </mitre>
+</rule>
+<!-- 3.16 — Remote File Inclusion attempt -->
+<rule id="200304" level="12">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <match type="pcre2">(?i)[?&amp;]\w+=(https?(:|%3a)(\/\/|%2f%2f))</match>
+  <description>Web Hosting: Remote File Inclusion attempt from $(srcip) on $(vhost)</description>
+  <group>web_attack,rfi,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_6.5.1,</group>
+  <mitre>
+    <id>T1190</id>
+  </mitre>
+</rule>
+<!-- 3.17 — Command injection attempt -->
+<rule id="200305" level="12">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <match type="pcre2">(?i)[?&amp;]\w+=.*(cmd=|exec=|system\(|passthru\(|shell_exec\(|;\s*(cat|ls|whoami|wget|curl)\s)</match>
+  <description>Web Hosting: Command injection attempt from $(srcip) on $(vhost)</description>
+  <group>web_attack,command_injection,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_6.5.1,</group>
+  <mitre>
+    <id>T1059</id>
+  </mitre>
+</rule>
+<!-- 3.18 — Webshell access attempt -->
+<rule id="200306" level="14">
+  <decoded_as>apache-vhost-full</decoded_as>
+  <match type="pcre2">(?i)(eval\(|base64_decode\(|shell_exec\(|assert\(|preg_replace\(.*\/e)</match>
+  <description>Web Hosting: Webshell access attempt from $(srcip) on $(vhost)</description>
+  <group>web_attack,webshell,gdpr_IV_35.7.d,nist_800_53_SI.4,pci_dss_6.5.1,</group>
+  <mitre>
+    <id>T1505.003</id>
+  </mitre>
+</rule>
+
+</group>
+
+<group name="webhosting,fim,namira,">
+
+  <!-- 3.19 — New PHP file created -->
+  <rule id="200400" level="12">
+    <if_sid>554</if_sid>
+    <field name="file" type="pcre2">/home/namira/.*\.php$</field>
+    <description>Web Hosting: New PHP file created — possible webshell: $(file)</description>
+    <group>webshell,gdpr_IV_35.7.d,nist_800_53_SI.7,pci_dss_11.5,</group>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+  </rule>
+
+  <!-- 3.20 — PHP file modified -->
+  <rule id="200401" level="10">
+    <if_sid>550</if_sid>
+    <field name="file" type="pcre2">/home/namira/.*\.php$</field>
+    <description>Web Hosting: PHP file modified — $(file)</description>
+    <group>fim,gdpr_IV_35.7.d,nist_800_53_SI.7,pci_dss_11.5,</group>
+    <mitre>
+      <id>T1505.003</id>
+    </mitre>
+  </rule>
+
+  <!-- 3.21 — Config file modified -->
+  <rule id="200402" level="10">
+    <if_sid>550</if_sid>
+    <field name="file" type="pcre2">/home/namira/.*\.(env|conf|config|ini|yml|yaml)$</field>
+    <description>Web Hosting: Config file modified — $(file)</description>
+    <group>fim,config_changed,gdpr_IV_35.7.d,nist_800_53_SI.7,pci_dss_11.5,</group>
+    <mitre>
+      <id>T1565.001</id>
+    </mitre>
+  </rule>
+
+</group>
+<group name="webhosting,webmin,">
+
+  <!-- 3.23 — Webmin authentication failure -->
+  <rule id="200501" level="5">
+    <decoded_as>webmin</decoded_as>
+    <field name="http_status">^401$</field>
+    <description>Web Hosting: Webmin authentication failure from $(srcip)</description>
+    <group>authentication_failed,gdpr_IV_35.7.d,nist_800_53_AC.7,pci_dss_10.2.4,</group>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+
+  <!-- 3.24 — Webmin brute force: 5+ failures in 60s -->
+  <rule id="200502" level="12" frequency="5" timeframe="60">
+    <if_matched_sid>200501</if_matched_sid>
+    <same_source_ip/>
+    <description>Web Hosting: Webmin brute force — 5+ failures from $(srcip)</description>
+    <group>bruteforce,authentication_failures,gdpr_IV_35.7.d,nist_800_53_AC.7,pci_dss_10.2.4,</group>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+  </rule>
+
+</group>
