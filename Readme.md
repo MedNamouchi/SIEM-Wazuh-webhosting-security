@@ -1,4 +1,4 @@
-# 🛡️ SIEM Web Hosting Security — Production Web Hosting Server
+# 🛡️ SIEM Web Hosting Security — <hosting-server>
 
 > Detection engineering on a production shared web hosting server: from a SIEM blind spot to full-coverage threat detection across 50+ client WordPress sites.
 
@@ -45,7 +45,7 @@ The server had a Wazuh agent installed but was effectively **blind** — the SIE
                 └────────┬────────┘
                          │
                ┌─────────▼───────────────────────┐
-               │         punica.ofir.hr           │
+               │         <hosting-server>           │
                │  Ubuntu 22.04 — Apache2          │
                │  Virtualmin — 50+ client vhosts  │
                │  WordPress + Laravel apps        │
@@ -53,7 +53,7 @@ The server had a Wazuh agent installed but was effectively **blind** — the SIE
                │  ┌──────────────────────────┐    │
                │  │     Wazuh Agent          │    │
                │  │  + mod_remoteip (IP fix) │    │
-               │  │  + FIM (namira scope)    │    │
+               │  │  + FIM (<client> scope)    │    │
                │  │  + iptables LOG rules    │    │
                │  └────────────┬─────────────┘    │
                └───────────────┼──────────────────┘
@@ -154,8 +154,8 @@ The server had a Wazuh agent installed but was effectively **blind** — the SIE
 
 | Rule ID | Description | Level | MITRE |
 |---|---|---|---|
-| 200400 | New PHP file created in namira web directory | 12 | T1505.003 |
-| 200401 | PHP file modified in namira web directory | 10 | T1505.003 |
+| 200400 | New PHP file created in <client> web directory | 12 | T1505.003 |
+| 200401 | PHP file modified in <client> web directory | 10 | T1505.003 |
 | 200402 | Config file modified (.env, .conf, .yml) | 10 | T1565.001 |
 
 ### Family 5 — Auth Brute Force (`200501–200502`)
@@ -219,6 +219,7 @@ The server had a Wazuh agent installed but was effectively **blind** — the SIE
 SIEM-Wazuh-webhosting-security/
 │
 ├── README.md
+├── .gitignore
 │
 ├── 01-discovery/
 │   └── Web-Hosting-Server-Discovery-Playbook.md    # Full discovery methodology
@@ -238,21 +239,30 @@ SIEM-Wazuh-webhosting-security/
 │
 ├── 04-active-response/
 │   ├── 01-ip-transparency-fix.md                   # mod_remoteip investigation & fix
+│   ├── 01-active-response-mattermost.md            # Active response documentation
 │   └── scripts/
-│       ├── web-alert-mattermost.sh                 # Contextual Mattermost alerts
-│       └── web-block.sh                            # IP blocking (pending NPM fix)
+│       └── web-alert-mattermost.sh                 # Contextual Mattermost alerts (25 templates)
 │
 ├── 05-dashboard/
-│   └── 01-soc-dashboard.md                         # OpenSearch dashboard documentation
+│   ├── 01-soc-dashboard.md                         # OpenSearch dashboard documentation
+│   └── soc-dashboard-webhosting.ndjson             # Dashboard export — importable in OpenSearch
 │
 ├── 06-use-cases/
-│   └── UC-01-mysql-cluster-node-monitoring.md      # MySQL direct access detection
+│   ├── UC-01-mysql-cluster-node-monitoring.md      # MySQL direct access detection
+│   ├── UC-02-wordpress-botnet-detection.md         # WordPress botnet — 250+ attempts
+│   ├── UC-03-scanner-detection.md                  # Nikto + organic scanner detection
+│   └── UC-04-lfi-wordpress-plugin.md               # LFI via vulnerable WP plugins
 │
-├── 07-threat-hunting/
+├── 07-playbooks/
+│   ├── PB-01-wordpress-brute-force-playbook.md     # WP brute force response
+│   ├── PB-02-webshell-detection-playbook.md        # Webshell detection response
+│   └── PB-03-alert-triage-checklist.md             # Alert triage & priority matrix
+│
+├── 08-threat-hunting/
 │   └── ssh-attack-investigation.md                 # Real SSH brute-force investigation
 │
-└── 08-lessons-learned/
-    └── key-findings-01.md                          # Key takeaways
+└── 09-lessons-learned/
+    └── key-findings-01.md                          # 12 key findings & reusable checklist
 ```
 
 ---
@@ -287,7 +297,7 @@ Built in OpenSearch — 16 visualizations covering:
 | Visualization | Type |
 |---|---|
 | Dashboard Header (project context) | Markdown |
-| Total Alerts — punica | Metric |
+| Total Alerts — <hosting-server> | Metric |
 | Alerts Timeline | Vertical Bar |
 | Alerts by Severity Level | Pie |
 | Top Triggering IPs | Horizontal Bar |
