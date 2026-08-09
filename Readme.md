@@ -1,4 +1,4 @@
-# 🛡️ SIEM Web Hosting Security — punica.ofir.hr
+# 🛡️ SIEM Web Hosting Security — Production Web Hosting Server
 
 > Detection engineering on a production shared web hosting server: from a SIEM blind spot to full-coverage threat detection across 50+ client WordPress sites.
 
